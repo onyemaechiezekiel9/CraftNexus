@@ -77,8 +77,8 @@ pub struct UserOnboardedEvent {
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct VerificationEntry {
     pub timestamp: u64,
-    /// "requested" | "approved" | "rejected" | "auto_verified"
-    pub action: String,
+    /// Compact action label: "auto_verified" | "requested" | "approved" | "rejected" | "username_changed_revoked"
+    pub action: Symbol,
     /// Address that performed the action (None for auto-verification)
     pub by: Option<Address>,
 }
@@ -1135,13 +1135,18 @@ impl OnboardingContract {
     /// Get activity metrics for a user.
     /// Returns zeroed metrics if no escrow activity has been recorded yet.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
-        env.storage()
+        let key = DataKey::UserMetrics(address.clone());
+        let metrics = env.storage()
             .persistent()
-            .get::<DataKey, UserMetrics>(&DataKey::UserMetrics(address.clone()))
+            .get::<DataKey, UserMetrics>(&key)
             .unwrap_or(UserMetrics {
                 total_escrow_count: 0,
                 total_volume: 0,
-            })
+            });
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+        metrics
     }
 
     /// Increment a user's activity metrics (called by the escrow contract).
@@ -1251,7 +1256,7 @@ impl OnboardingContract {
                 .unwrap_or(Vec::new(env));
             history.push_back(VerificationEntry {
                 timestamp: env.ledger().timestamp(),
-                action: String::from_str(env, "auto_verified"),
+                action: Symbol::new(env, "auto_verified"),
                 by: None,
             });
             if history.len() > 10 {
@@ -1344,7 +1349,7 @@ if Self::is_verification_pending(&env, &user) {
             .unwrap_or(Vec::new(&env));
         history.push_back(VerificationEntry {
             timestamp: env.ledger().timestamp(),
-            action: String::from_str(&env, "requested"),
+            action: Symbol::new(&env, "requested"),
             by: Some(user.clone()),
         });
         if history.len() > 10 {
@@ -1383,7 +1388,7 @@ if Self::is_verification_pending(&env, &user) {
         Self::clear_verification_request(&env, &user);
 
         // Append to history
-        let action = if approve { "approved" } else { "rejected" };
+        let action = if approve { Symbol::new(&env, "approved") } else { Symbol::new(&env, "rejected") };
         let hist_key = DataKey::VerificationHistory(user.clone());
         let mut history: Vec<VerificationEntry> = env
             .storage()
@@ -1392,7 +1397,7 @@ if Self::is_verification_pending(&env, &user) {
             .unwrap_or(Vec::new(&env));
         history.push_back(VerificationEntry {
             timestamp: env.ledger().timestamp(),
-            action: String::from_str(&env, action),
+            action,
             by: Some(config.platform_admin.clone()),
         });
         if history.len() > 10 {
@@ -1410,10 +1415,14 @@ if Self::is_verification_pending(&env, &user) {
     /// Get the full verification history for a user.
     pub fn get_verification_history(env: Env, user: Address) -> Vec<VerificationEntry> {
         let hist_key = DataKey::VerificationHistory(user.clone());
-        env.storage()
+        let history = env.storage()
             .persistent()
             .get(&hist_key)
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+        if env.storage().persistent().has(&hist_key) {
+            Self::extend_persistent(&env, &hist_key);
+        }
+        history
     }
 
     /// Get all addresses currently awaiting manual verification (admin helper).
@@ -1616,7 +1625,7 @@ if Self::is_verification_pending(&env, &user) {
             .unwrap_or(Vec::new(&env));
         history.push_back(VerificationEntry {
             timestamp: env.ledger().timestamp(),
-            action: String::from_str(&env, "username_changed_revoked"),
+            action: Symbol::new(&env, "username_changed_revoked"),
             by: Some(user.clone()),
         });
         if history.len() > 10 {
