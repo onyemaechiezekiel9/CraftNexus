@@ -823,6 +823,7 @@ pub trait OnboardingInterface {
     );
     fn deactivate_profile(env: Env, user: Address);
     fn verify_user(env: Env, user: Address) -> UserProfile;
+    fn has_active_contracts(env: Env, user: Address) -> bool;
 }
 
 #[contract]
