@@ -1386,6 +1386,45 @@ fn test_error_enum_backward_compatibility() {
     assert_eq!(Error::StakeTokenMismatch as u32, 24);
 }
 
+/// Issue #117 — set_moderator must reject callers that are not the platform admin.
+#[test]
+#[should_panic]
+fn test_set_moderator_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &soroban_sdk::String::from_str(&env, "target_user"), &UserRole::Buyer);
+
+    // Clear mocked auths so the next call has no authorization.
+    env.set_auths(&[]);
+
+    // Calling set_moderator without admin auth must panic.
+    client.set_moderator(&user);
+}
+
+/// Issue #514 / #113 — reactivate_profile must reject callers without user authorization.
+#[test]
+#[should_panic]
+fn test_reactivate_profile_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &soroban_sdk::String::from_str(&env, "someuser"), &UserRole::Buyer);
+    client.deactivate_profile(&user);
+
+    // Clear all mocked auths — no authorization provided.
+    env.set_auths(&[]);
+
+    // Must panic: no auth for `user`.
+    client.reactivate_profile(&user);
+}
+
 #[test]
 fn test_has_active_contracts() {
     let env = Env::default();
@@ -1486,4 +1525,3 @@ fn test_get_verification_queue_authorized() {
     assert_eq!(auths.len(), 1);
     assert_eq!(auths.get(0).unwrap().0, admin);
 }
-

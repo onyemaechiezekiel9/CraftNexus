@@ -178,3 +178,45 @@ fn test_admin_deactivation_fails() {
 
     onboarding.deactivate_profile(&admin);
 }
+
+// ===== Issue #115: reactivate_profile =====
+
+#[test]
+fn test_reactivate_profile_success() {
+    let env = Env::default();
+    let (_, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
+
+    onboarding.deactivate_profile(&buyer);
+    assert_eq!(onboarding.get_user(&buyer).status, ProfileStatus::Deactivated);
+    assert!(!onboarding.is_username_taken(&String::from_str(&env, "buyer")));
+
+    let profile = onboarding.reactivate_profile(&buyer);
+    assert_eq!(profile.status, ProfileStatus::Active);
+    assert!(onboarding.is_username_taken(&String::from_str(&env, "buyer")));
+}
+
+#[test]
+#[should_panic]
+fn test_reactivate_profile_already_active_fails() {
+    let env = Env::default();
+    let (_, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
+
+    // Profile is Active — reactivating should panic
+    onboarding.reactivate_profile(&buyer);
+}
+
+#[test]
+#[should_panic]
+fn test_reactivate_profile_username_taken_fails() {
+    let env = Env::default();
+    let (_, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
+
+    onboarding.deactivate_profile(&buyer);
+
+    // Another user claims the username while buyer is deactivated
+    let other = Address::generate(&env);
+    onboarding.onboard_user(&other, &String::from_str(&env, "buyer"), &UserRole::Buyer);
+
+    // Now reactivation must fail — username is taken
+    onboarding.reactivate_profile(&buyer);
+}
