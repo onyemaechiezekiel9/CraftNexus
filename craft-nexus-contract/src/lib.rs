@@ -388,7 +388,7 @@ pub struct Escrow {
     pub created_at: u32,
     pub ipfs_hash: Option<String>,
     pub metadata_hash: Option<Bytes>,
-    pub dispute_reason: Option<String>,
+    pub dispute_reason: Option<Symbol>,
     pub dispute_initiated_at: Option<u64>,
     pub funded: bool,
 }
@@ -2778,7 +2778,7 @@ impl CraftNexusContract {
             .unwrap_or_else(|| env.panic_with_error(crate::Error::PlatformNotInitialized))
     }
 
-    fn try_get_escrow_readonly(env: &Env, order_id: u32) -> Escrow {
+    ffn try_get_escrow_readonly(env: &Env, order_id: u32) -> Escrow {
         let key = (ESCROW, order_id);
         let stored: Val = env
             .storage()
@@ -2795,19 +2795,31 @@ impl CraftNexusContract {
                 if escrow.version < CURRENT_ESCROW_VERSION {
                     escrow.version = CURRENT_ESCROW_VERSION;
                 }
+                Self::extend_persistent(env, &key); // OPTIMIZED: Ensure TTL extension on read
                 return escrow;
             }
 
             let previous = EscrowWithoutBatch::try_from_val(env, &stored).expect("");
-            let mut escrow = Self::escrow_from_without_batch(previous);
+            let mut escrow = Self::escrow_from_without_batch(env, previous);
             if escrow.version < CURRENT_ESCROW_VERSION {
                 escrow.version = CURRENT_ESCROW_VERSION;
             }
+            Self::extend_persistent(env, &key); // OPTIMIZED: Ensure TTL extension on read
             return escrow;
         }
 
         let legacy = LegacyEscrow::try_from_val(env, &stored).expect("");
-        Escrow {
+        
+        let dispute_symbol = legacy.dispute_reason.map(|r| {
+            // Safety bound: Symbols max at 32 chars. Truncate if legacy reason is too long.
+            let len = r.len() as usize;
+            let slice_len = core::cmp::min(len, 32);
+            let mut buf = [0u8; 32];
+            r.copy_into_slice(&mut buf[..slice_len]);
+            Symbol::from_bytes(env, &buf[..slice_len])
+        });
+
+        let upgraded = Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: legacy.id,
             batch_id: None,
@@ -2820,11 +2832,14 @@ impl CraftNexusContract {
             created_at: legacy.created_at,
             ipfs_hash: legacy.ipfs_hash,
             metadata_hash: legacy.metadata_hash,
-            dispute_reason: legacy.dispute_reason,
+            dispute_reason: dispute_symbol, // Map to lightweight Symbol
             dispute_initiated_at: legacy.dispute_initiated_at,
             funded: true,
-        }
+        };
+        Self::extend_persistent(env, &key); // OPTIMIZED: Ensure TTL extension on read
+        upgraded
     }
+
 
     fn get_stored_escrow(env: &Env, order_id: u32) -> Escrow {
         let key = (ESCROW, order_id);
@@ -2885,7 +2900,15 @@ impl CraftNexusContract {
         escrow
     }
 
-    fn escrow_from_without_batch(escrow: EscrowWithoutBatch) -> Escrow {
+    fn escrow_from_without_batch(env: &Env, escrow: EscrowWithoutBatch) -> Escrow {
+        let dispute_symbol = escrow.dispute_reason.map(|r| {
+            let len = r.len() as usize;
+            let slice_len = core::cmp::min(len, 32);
+            let mut buf = [0u8; 32];
+            r.copy_into_slice(&mut buf[..slice_len]);
+            Symbol::from_bytes(env, &buf[..slice_len])
+        });
+
         Escrow {
             version: escrow.version,
             id: escrow.id,
@@ -2899,7 +2922,7 @@ impl CraftNexusContract {
             created_at: escrow.created_at,
             ipfs_hash: escrow.ipfs_hash,
             metadata_hash: escrow.metadata_hash,
-            dispute_reason: escrow.dispute_reason,
+            dispute_reason: dispute_symbol, // Map to lightweight Symbol
             dispute_initiated_at: escrow.dispute_initiated_at,
             funded: true,
         }
@@ -3876,10 +3899,10 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     /// * `dispute_reason` - Reason for dispute
     /// * `authorized_address` - Address authorized to dispute (buyer or seller)
-    pub fn dispute_escrow(
+   pub fn dispute_escrow(
         env: Env,
         order_id: u32,
-        dispute_reason: String,
+        dispute_reason: Symbol, // UPDATE ARGUMENT TYPE
         authorized_address: Address,
     ) {
         authorized_address.require_auth();
@@ -3896,7 +3919,7 @@ impl CraftNexusContract {
         }
 
         escrow.status = EscrowStatus::Disputed;
-        escrow.dispute_reason = Some(dispute_reason.clone());
+        escrow.dispute_reason = Some(dispute_reason); // Assign Symbol
         escrow.dispute_initiated_at = Some(env.ledger().timestamp());
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
 
@@ -3913,7 +3936,7 @@ impl CraftNexusContract {
             },
         );
     }
-
+    
     /// Resolve disputed escrow (arbitrator only).
     ///
     /// This function transitions the escrow from `Disputed` to `Resolved`.
