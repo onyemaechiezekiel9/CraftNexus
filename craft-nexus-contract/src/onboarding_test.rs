@@ -736,6 +736,100 @@ fn test_process_verification_request_preserves_other_pending_users() {
     assert_eq!(queue.get(0), Some(user_two));
 }
 
+// ============================================================
+// Issue #41 – admin_clear_verification_request authorization
+// ============================================================
+
+/// Admin can force-clear a pending verification request, advancing the queue.
+#[test]
+fn test_admin_clear_verification_request_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "stale_req"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&user);
+    assert!(client.is_verification_pending(&user));
+
+    let was_pending = client.admin_clear_verification_request(&user);
+    assert!(was_pending);
+
+    // Request is gone and the queue has been compacted.
+    assert!(!client.is_verification_pending(&user));
+    assert_eq!(client.get_verification_queue().len(), 0);
+
+    // The admin's authorization was the one that gated the call.
+    let auths = env.auths();
+    assert!(auths.iter().any(|(addr, _)| addr == &admin));
+}
+
+/// Clearing a user with no pending request is an idempotent no-op returning false.
+#[test]
+fn test_admin_clear_verification_request_no_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "no_req"),
+        &UserRole::Artisan,
+    );
+
+    let was_pending = client.admin_clear_verification_request(&user);
+    assert!(!was_pending);
+}
+
+/// Unauthorized callers cannot clear another user's verification request:
+/// without the admin signature the require_auth() check rolls the call back.
+#[test]
+#[should_panic]
+fn test_admin_clear_verification_request_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "victim"),
+        &UserRole::Artisan,
+    );
+    client.request_verification(&user);
+
+    // Drop all mocked authorizations so the admin's require_auth() fails.
+    env.set_auths(&[]);
+    client.admin_clear_verification_request(&user);
+}
+
+/// A cleared request must not have flipped the user's verification status —
+/// force-clear is a queue-hygiene operation, not an approval.
+#[test]
+fn test_admin_clear_verification_request_does_not_verify() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "unverified"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&user);
+    client.admin_clear_verification_request(&user);
+
+    assert!(!client.is_verified(&user));
+}
+
 /// Verification history is tracked across request, approve, and auto-verify actions.
 #[test]
 fn test_verification_history_tracking() {

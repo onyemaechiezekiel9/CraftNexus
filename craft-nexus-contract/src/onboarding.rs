@@ -2680,6 +2680,65 @@ impl OnboardingContract {
         }
     }
 
+    /// Force-clear a pending manual verification request without approving or
+    /// rejecting it (admin only).
+    ///
+    /// # Security — issue #41 / endpoint hardening
+    ///
+    /// Unlike [`OnboardingContract::request_verification`] (which a user invokes
+    /// for themselves) this is a privileged queue-maintenance state transition:
+    /// it removes an arbitrary user's pending request and advances the manual
+    /// verification queue head. Allowing any caller to invoke it would let a
+    /// malicious actor evict legitimate users from the verification queue,
+    /// denying them admin review. The endpoint is therefore locked behind
+    /// `OnboardingConfig::platform_admin.require_auth()`, which is evaluated
+    /// *before* any storage mutation. An unauthorized invocation fails the auth
+    /// check and the host rolls the entire transaction back, leaving the queue
+    /// untouched.
+    ///
+    /// Use this to evict stale or abandoned requests (e.g. from users who later
+    /// deactivated) so the queue head can advance. To verify or reject a request
+    /// and record an audit entry, prefer
+    /// [`OnboardingContract::process_verification_request`] instead.
+    ///
+    /// # Preconditions
+    /// - Contract must be initialized.
+    /// - Caller must be `OnboardingConfig::platform_admin` (`require_auth`).
+    ///
+    /// # Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Removes `DataKey::VerificationRequest(user)` (if present) and compacts
+    ///   the queue by advancing `DataKey::VerificationQueueHead`.
+    /// - No `UserProfile` shape is touched, so no profile-version upgrade is
+    ///   required (`CURRENT_USER_PROFILE_VERSION` unaffected).
+    ///
+    /// # Arguments
+    /// * `user` - Address whose pending verification request should be cleared.
+    ///
+    /// # Returns
+    /// `true` if a pending request existed and was cleared; `false` if the user
+    /// had no pending request (call is an idempotent no-op in that case).
+    ///
+    /// # Reverts if
+    /// - Contract not initialized.
+    /// - Caller is not the platform admin.
+    pub fn admin_clear_verification_request(env: Env, user: Address) -> bool {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        // Authorization gate — must run before any state mutation so an
+        // unauthorized caller triggers a full transaction rollback (#41).
+        config.platform_admin.require_auth();
+
+        let was_pending = Self::is_verification_pending_internal(&env, &user);
+        Self::clear_verification_request(&env, &user);
+        was_pending
+    }
+
     /// Get the full verification history for a user.
     ///
     /// Only the user themselves may read their own verification history.
