@@ -21,6 +21,15 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+fn to_bytes(env: &Env, s: &String) -> Bytes {
+    let mut bytes = Bytes::new(env);
+    let len = s.len() as usize;
+    let mut buf = [0u8; 128];
+    s.copy_into_slice(&mut buf[..len]);
+    bytes.extend_from_slice(&buf[..len]);
+    bytes
+}
+
 // ===== Initialization =====
 
 #[test]
@@ -745,6 +754,100 @@ fn test_process_verification_request_preserves_other_pending_users() {
     assert_eq!(queue.get(0), Some(user_two));
 }
 
+// ============================================================
+// Issue #41 – admin_clear_verification_request authorization
+// ============================================================
+
+/// Admin can force-clear a pending verification request, advancing the queue.
+#[test]
+fn test_admin_clear_verification_request_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "stale_req"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&user);
+    assert!(client.is_verification_pending(&user));
+
+    let was_pending = client.admin_clear_verification_request(&user);
+    assert!(was_pending);
+
+    // Request is gone and the queue has been compacted.
+    assert!(!client.is_verification_pending(&user));
+    assert_eq!(client.get_verification_queue().len(), 0);
+
+    // The admin's authorization was the one that gated the call.
+    let auths = env.auths();
+    assert!(auths.iter().any(|(addr, _)| addr == &admin));
+}
+
+/// Clearing a user with no pending request is an idempotent no-op returning false.
+#[test]
+fn test_admin_clear_verification_request_no_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "no_req"),
+        &UserRole::Artisan,
+    );
+
+    let was_pending = client.admin_clear_verification_request(&user);
+    assert!(!was_pending);
+}
+
+/// Unauthorized callers cannot clear another user's verification request:
+/// without the admin signature the require_auth() check rolls the call back.
+#[test]
+#[should_panic]
+fn test_admin_clear_verification_request_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "victim"),
+        &UserRole::Artisan,
+    );
+    client.request_verification(&user);
+
+    // Drop all mocked authorizations so the admin's require_auth() fails.
+    env.set_auths(&[]);
+    client.admin_clear_verification_request(&user);
+}
+
+/// A cleared request must not have flipped the user's verification status —
+/// force-clear is a queue-hygiene operation, not an approval.
+#[test]
+fn test_admin_clear_verification_request_does_not_verify() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "unverified"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&user);
+    client.admin_clear_verification_request(&user);
+
+    assert!(!client.is_verified(&user));
+}
+
 /// Verification history is tracked across request, approve, and auto-verify actions.
 #[test]
 fn test_verification_history_tracking() {
@@ -1088,8 +1191,7 @@ fn test_change_username_with_special_characters() {
     assert_eq!(
         updated.username,
         Symbol::new(&env, "new_user_name_123")
-    );
-}
+    );}
 
 #[test]
 fn test_change_username_preserves_other_fields() {
@@ -1601,6 +1703,65 @@ fn test_update_active_contracts_tracks_state() {
     assert!(!client.has_active_contracts(&user));
 }
 
+// ============================================================
+// Feature #47 – precise active-contract count for escrow/reputation flows
+// ============================================================
+
+/// get_active_contract_count returns 0 for a user with no tracked contracts.
+#[test]
+fn test_get_active_contract_count_defaults_to_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "counter0"), &UserRole::Buyer);
+
+    assert_eq!(client.get_active_contract_count(&user), 0);
+    assert!(!client.has_active_contracts(&user));
+}
+
+/// get_active_contract_count reflects each increment/decrement state transition
+/// and stays consistent with the has_active_contracts boolean.
+#[test]
+fn test_get_active_contract_count_tracks_transitions() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "counterN"), &UserRole::Buyer);
+
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    let platform_wallet = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    let escrow_client = crate::CraftNexusContractClient::new(&env, &escrow_id);
+    escrow_client.initialize(
+        &platform_wallet,
+        &admin,
+        &arbitrator,
+        &500,
+        &Some(client.address.clone()),
+    );
+    client.set_escrow_contract(&escrow_id);
+
+    // 0 -> 2: two concurrent active contracts.
+    client.update_active_contracts(&user, &1);
+    client.update_active_contracts(&user, &1);
+    assert_eq!(client.get_active_contract_count(&user), 2);
+    assert!(client.has_active_contracts(&user));
+
+    // 2 -> 1: one closes.
+    client.update_active_contracts(&user, &-1);
+    assert_eq!(client.get_active_contract_count(&user), 1);
+    assert!(client.has_active_contracts(&user));
+
+    // 1 -> 0: last one closes, entry is removed and count reads back as zero.
+    client.update_active_contracts(&user, &-1);
+    assert_eq!(client.get_active_contract_count(&user), 0);
+    assert!(!client.has_active_contracts(&user));
+}
+
 #[test]
 #[should_panic]
 fn test_update_active_contracts_underflow_panics() {
@@ -1717,6 +1878,7 @@ fn test_is_verification_pending_unauthorized() {
     env.set_auths(&[]);
     client.is_verification_pending(&user);
 }
+
 
 // ── Issue #470: [SECURITY] Endpoint #69 – set_moderator ─────────────────────
 

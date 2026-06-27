@@ -313,7 +313,7 @@ fn test_dispute_escrow_unauthorized() {
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
     let unauthorized = Address::generate(&env);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Invalid reason"), &unauthorized);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Invalid_reason"), &unauthorized);
 }
 
 #[test]
@@ -352,7 +352,7 @@ fn test_resolve_dispute_release_to_seller() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Non-delivery"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Non_delivery"), &buyer);
 
     // Arbitrator is setup in setup_test as a random Address and mock_all_auths bypasses auth
     client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);

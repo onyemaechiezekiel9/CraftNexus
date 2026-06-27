@@ -11,6 +11,9 @@ use soroban_sdk::{
 };
 use alloc::string::ToString;
 
+extern crate alloc;
+use alloc::string::ToString;
+
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
@@ -442,6 +445,35 @@ fn normalize_username(env: &Env, username: &String) -> String {
     String::from_bytes(env, &normalized[..out_len])
 }
 
+/// Transliterate the leading multi-byte character of a username to its ASCII
+/// equivalent (component #48 — username normalization interface).
+///
+/// This is the lookup table that drives [`normalize_username`]: it maps the
+/// first UTF-8 character of `input` (accented Latin letters, Greek, and
+/// Cyrillic look-alikes, plus zero-width/BOM separators) to a stable ASCII
+/// byte sequence so that visually-similar usernames collapse to one canonical
+/// form. Canonicalization is what makes the `DataKey::Username` index a true
+/// uniqueness constraint and blocks homoglyph squatting (e.g. Cyrillic "о" vs
+/// Latin "o").
+///
+/// # Off-chain integration
+///
+/// Clients and indexers that need to predict the on-chain canonical username
+/// (for example, to check availability before submitting `onboard_user`) must
+/// reproduce this exact mapping. The mapping is intentionally append-only:
+/// existing entries are never repointed, so a username that normalized a given
+/// way on registration continues to resolve identically across upgrades.
+///
+/// # Parameters
+/// - `input`: the remaining username bytes, positioned at the start of a UTF-8
+///   character. Only the leading byte(s) are inspected.
+///
+/// # Returns
+/// - `Some((ascii, consumed))` — `ascii` is the replacement byte slice to emit
+///   and `consumed` is the number of input bytes the matched character
+///   occupied (so the caller can advance its cursor).
+/// - `None` — the leading character has no transliteration rule; the caller
+///   handles it with its default lowercasing/separator logic.
 fn map_username_bytes(input: &[u8]) -> Option<(&'static [u8], usize)> {
     match input {
         [0xC3, 0x84, ..]
@@ -522,6 +554,27 @@ fn map_username_bytes(input: &[u8]) -> Option<(&'static [u8], usize)> {
     }
 }
 
+/// Return the length, in bytes, of the UTF-8 character that begins with
+/// `first_byte` (component #48 — username normalization interface).
+///
+/// Used by [`normalize_username`] and [`map_username_bytes`] to advance the
+/// byte cursor one full character at a time when scanning a username, since
+/// `no_std` Soroban strings are processed as raw byte buffers rather than as
+/// `char` iterators. The length is derived purely from the leading byte's
+/// high bits per the UTF-8 encoding:
+///
+/// - `0x00..=0x7F` → 1 byte (ASCII)
+/// - `0xC0..=0xDF` → 2 bytes
+/// - `0xE0..=0xEF` → 3 bytes
+/// - `0xF0..=0xF7` → 4 bytes
+///
+/// # Parameters
+/// - `first_byte`: the first byte of a UTF-8 character.
+///
+/// # Returns
+/// The byte length of the character (1–4). Continuation bytes and any invalid
+/// leading byte fall back to `1` so the scanner always makes forward progress
+/// and never loops on malformed input.
 fn utf8_char_len(first_byte: u8) -> usize {
     match first_byte {
         0x00..=0x7F => 1,
@@ -1241,7 +1294,7 @@ impl OnboardingContract {
             version: CURRENT_USER_PROFILE_VERSION,
             address: admin.clone(),
             role: UserRole::Admin,
-            username: Symbol::new(&env, &normalized.to_string()),
+            username: Symbol::new(&env, "admin"),
             registered_at: env.ledger().timestamp(),
             is_verified: true,
             successful_trades: 0,
@@ -1351,13 +1404,18 @@ impl OnboardingContract {
         // Normalize the username (lowercase + trim whitespace)
         let normalized = normalize_username(&env, &username);
         
-        // Validate username length after normalization
+        // Convert to Symbol for optimized storage
+        let username_len = core::cmp::min(normalized.len() as usize, 32);
+        let mut user_buf = [0u8; 32];
+        normalized.copy_into_slice(&mut user_buf[..username_len]);
+        let s = core::str::from_utf8(&user_buf[..username_len]).unwrap();
+        let optimized_username = Symbol::new(&env, s);
         assert!(
-            normalized.len() >= config.min_username_length,
+            username_len >= config.min_username_length as usize,
             "Username too short"
         );
         assert!(
-            normalized.len() <= config.max_username_length,
+            username_len <= config.max_username_length as usize,
             "Username too long"
         );
 
@@ -1410,13 +1468,7 @@ impl OnboardingContract {
             version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
             role,
-            username: {
-                let mut buf = [0u8; 32];
-                let l = core::cmp::min(normalized.len(), 32) as usize;
-                normalized.copy_into_slice(&mut buf[..l]);
-                let s = core::str::from_utf8(&buf[..l]).unwrap();
-                Symbol::new(&env, s)
-            },
+            username: optimized_username,
             registered_at: env.ledger().timestamp(),
             is_verified: false,
             successful_trades: 0,
@@ -1556,6 +1608,65 @@ impl OnboardingContract {
             client.has_active_escrows(&user)
         } else {
             false
+        }
+    }
+
+    /// Return the precise number of active escrow contracts tracked for `user`.
+    ///
+    /// # Enhanced business flow — feature #47
+    ///
+    /// [`OnboardingContract::has_active_contracts`] only answers the boolean
+    /// "is the user currently engaged?" question. Complex escrow and reputation
+    /// scenarios — staggered multi-order settlement, reputation weighting by
+    /// concurrent workload, and off-chain risk dashboards — need the exact
+    /// concurrency level, not just a flag. This endpoint exposes the locally
+    /// maintained `DataKey::ActiveContractCount(user)` counter so off-chain
+    /// indexers and client UIs can read it directly without replaying every
+    /// escrow event or making a cross-contract call.
+    ///
+    /// The counter is the same value maintained by
+    /// [`OnboardingContract::update_active_contracts`] (incremented when an
+    /// escrow becomes active, decremented on close). When no local entry exists
+    /// the user has no tracked active contracts and `0` is returned; this is the
+    /// canonical "not engaged" state and is consistent with
+    /// `has_active_contracts` returning `false`.
+    ///
+    /// # Authorization
+    /// - None. This is a read-only query that mutates no business state and
+    ///   therefore needs no `require_auth`; it may be called by indexers and
+    ///   clients freely. It only refreshes the TTL of entries it reads.
+    ///
+    /// # Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Reads and (when present) extends TTL on
+    ///   `DataKey::ActiveContractCount(user)`.
+    /// - No `UserProfile` shape is touched, so no profile-version upgrade is
+    ///   required (`CURRENT_USER_PROFILE_VERSION` unaffected).
+    ///
+    /// # Arguments
+    /// * `user` - Address whose active-contract concurrency is being queried.
+    ///
+    /// # Returns
+    /// The number of currently-active contracts for `user` (`0` when none are
+    /// tracked).
+    ///
+    /// # Reverts if
+    /// - Contract not initialized.
+    pub fn get_active_contract_count(env: Env, user: Address) -> u32 {
+        let _config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        let key = DataKey::ActiveContractCount(user);
+        match env.storage().persistent().get::<_, u32>(&key) {
+            Some(count) => {
+                Self::extend_persistent(&env, &key);
+                count
+            }
+            None => 0,
         }
     }
 
@@ -1822,11 +1933,8 @@ impl OnboardingContract {
             env.panic_with_error(Error::ProfileDeactivated);
         }
 
-        let username_str = {
-            let s = profile.username.to_string();
-            String::from_str(&env, &s)
-        };
-        let normalized = normalize_username(&env, &username_str);
+        let username_string = String::from_str(&env, profile.username.to_string().as_ref());
+        let normalized = normalize_username(&env, &username_string);
         if normalized == String::from_str(&env, "admin") {
             env.panic_with_error(Error::Unauthorized);
         }
@@ -1931,11 +2039,8 @@ impl OnboardingContract {
         }
 
         // Re-claim username — fail if another user took it while deactivated
-        let username_str = {
-            let s = profile.username.to_string();
-            String::from_str(&env, &s)
-        };
-        let normalized = normalize_username(&env, &username_str);
+        let username_string = String::from_str(&env, profile.username.to_string().as_ref());
+        let normalized = normalize_username(&env, &username_string);
         if env
             .storage()
             .persistent()
@@ -2681,6 +2786,65 @@ impl OnboardingContract {
         }
     }
 
+    /// Force-clear a pending manual verification request without approving or
+    /// rejecting it (admin only).
+    ///
+    /// # Security — issue #41 / endpoint hardening
+    ///
+    /// Unlike [`OnboardingContract::request_verification`] (which a user invokes
+    /// for themselves) this is a privileged queue-maintenance state transition:
+    /// it removes an arbitrary user's pending request and advances the manual
+    /// verification queue head. Allowing any caller to invoke it would let a
+    /// malicious actor evict legitimate users from the verification queue,
+    /// denying them admin review. The endpoint is therefore locked behind
+    /// `OnboardingConfig::platform_admin.require_auth()`, which is evaluated
+    /// *before* any storage mutation. An unauthorized invocation fails the auth
+    /// check and the host rolls the entire transaction back, leaving the queue
+    /// untouched.
+    ///
+    /// Use this to evict stale or abandoned requests (e.g. from users who later
+    /// deactivated) so the queue head can advance. To verify or reject a request
+    /// and record an audit entry, prefer
+    /// [`OnboardingContract::process_verification_request`] instead.
+    ///
+    /// # Preconditions
+    /// - Contract must be initialized.
+    /// - Caller must be `OnboardingConfig::platform_admin` (`require_auth`).
+    ///
+    /// # Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Removes `DataKey::VerificationRequest(user)` (if present) and compacts
+    ///   the queue by advancing `DataKey::VerificationQueueHead`.
+    /// - No `UserProfile` shape is touched, so no profile-version upgrade is
+    ///   required (`CURRENT_USER_PROFILE_VERSION` unaffected).
+    ///
+    /// # Arguments
+    /// * `user` - Address whose pending verification request should be cleared.
+    ///
+    /// # Returns
+    /// `true` if a pending request existed and was cleared; `false` if the user
+    /// had no pending request (call is an idempotent no-op in that case).
+    ///
+    /// # Reverts if
+    /// - Contract not initialized.
+    /// - Caller is not the platform admin.
+    pub fn admin_clear_verification_request(env: Env, user: Address) -> bool {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        // Authorization gate — must run before any state mutation so an
+        // unauthorized caller triggers a full transaction rollback (#41).
+        config.platform_admin.require_auth();
+
+        let was_pending = Self::is_verification_pending_internal(&env, &user);
+        Self::clear_verification_request(&env, &user);
+        was_pending
+    }
+
     /// Get the full verification history for a user.
     ///
     /// Only the user themselves may read their own verification history.
@@ -2979,15 +3143,9 @@ impl OnboardingContract {
             "Username already taken"
         );
 
-        Self::collect_username_change_fee(&env, &user, &config);
-
         // Atomically remove old username mapping and add new one
         let old_username = profile.username.clone();
-        // env.storage()
-        //     .persistent()
-        //     .remove(&DataKey::Username(old_username));
-
-        let old_string = String::from_str(&env, &old_username.to_string());
+        let old_string = String::from_str(&env, old_username.to_string().as_ref());
         env.storage().persistent().remove(&DataKey::Username(old_string));
 
         // Store new username → address mapping
@@ -2997,7 +3155,12 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &DataKey::Username(normalized_new.clone()));
 
         // Update profile with new username
-        profile.username = Symbol::new(&env, &normalized_new.to_string());
+        let new_username_len = core::cmp::min(normalized_new.len() as usize, 32);
+        let mut user_buf = [0u8; 32];
+        normalized_new.copy_into_slice(&mut user_buf[..new_username_len]);
+        let rust_str = core::str::from_utf8(&user_buf[..new_username_len]).unwrap();
+        let optimized_new_username = Symbol::new(&env, rust_str);
+        profile.username = optimized_new_username;
         profile.is_verified = false;
 
         // Store updated profile
@@ -3032,6 +3195,9 @@ impl OnboardingContract {
         // Emit event
         env.events()
             .publish((Symbol::new(&env, "UsernameChanged"),), &user);
+
+        // Interaction (CEI pattern: external transfer is the last step)
+        Self::collect_username_change_fee(&env, &user, &config);
 
         profile
     }
