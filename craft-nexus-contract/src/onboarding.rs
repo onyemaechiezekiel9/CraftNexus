@@ -3,7 +3,7 @@
 //! Handles user registration (onboarding), role assignments, username configuration,
 //! profile management, and verification processes for buyers and artisans on the CraftNexus platform.
 
-#![allow(unexpected_cfgs)]
+
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
@@ -12,7 +12,6 @@ use soroban_sdk::{
 use alloc::string::ToString;
 
 extern crate alloc;
-use alloc::string::ToString;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
