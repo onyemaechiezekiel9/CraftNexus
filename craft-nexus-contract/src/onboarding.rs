@@ -979,7 +979,16 @@ impl OnboardingContract {
         Self::migrate_legacy_verification_history(env, user);
 
         let count_key = DataKey::VerificationHistoryCount(user.clone());
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        // [PERFORMANCE #94] Extend TTL on read so the count key does not expire while
+        // the buffer is still in active use. Without this bump a count entry close to
+        // its TTL deadline could be archived on the same ledger as the write that follows,
+        // silently resetting the history length to zero on the next call.
+        let count: u32 = if let Some(c) = env.storage().persistent().get(&count_key) {
+            Self::extend_persistent(env, &count_key);
+            c
+        } else {
+            0
+        };
 
         // [FEATURE #83] Circular-buffer rotation for active contracts:
         // When history is full, shift older entries down and append new entry at end.
@@ -1385,6 +1394,9 @@ impl OnboardingContract {
     /// assert!(!profile.is_verified);
     /// ```
     pub fn onboard_user(env: Env, user: Address, username: String, role: UserRole) -> UserProfile {
+        // [SECURITY] Endpoint #93: The registering user must prove ownership of the
+        // supplied address. Unauthorized invocation without a valid user signature is
+        // rejected before any state mutation.
         user.require_auth();
 
         // Validate role is valid (only Buyer or Artisan for self-onboarding)
@@ -1400,6 +1412,11 @@ impl OnboardingContract {
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
+
+        // [SECURITY] Endpoint #93: Only verified platform roles may approve new user
+        // registrations. The platform admin must co-sign every onboarding transaction
+        // to prevent unauthorized state transitions.
+        config.platform_admin.require_auth();
 
         // Normalize the username (lowercase + trim whitespace)
         let normalized = normalize_username(&env, &username);
