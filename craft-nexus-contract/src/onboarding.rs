@@ -1789,6 +1789,7 @@ impl OnboardingContract {
     pub fn is_onboarded(env: Env, user: Address) -> bool {
         user.require_auth();
         let key = DataKey::UserProfile(user.clone());
+        // Issue #423/#435: extend TTL on read to prevent storage expiry
         if env.storage().persistent().has(&key) {
             Self::extend_persistent(&env, &key);
             true
@@ -2394,10 +2395,8 @@ impl OnboardingContract {
     /// [`UserMetrics`] with `total_escrow_count` and `total_volume` populated,
     /// or zeroed defaults when no escrow activity has been recorded.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
-        // [SECURITY] Endpoint #29: activity metrics are user-private; only the
-        // account owner may read them. Unauthorized access rolls back immediately.
+        // Issue #426/#434: require auth to prevent unauthorized access to user activity data
         address.require_auth();
-
         let metrics_key = DataKey::UserMetrics(address.clone());
         let metrics = env
             .storage()
@@ -3075,18 +3074,17 @@ impl OnboardingContract {
     /// # Returns
     /// Tuple `(successful_trades, disputed_trades)`.
     pub fn get_user_reputation(env: Env, address: Address) -> (u32, u32) {
-        // [SECURITY] Endpoint #45: reputation counters are user-private; only
-        // the account owner may read them. Unauthorized access rolls back immediately.
+        // Issue #426/#434: require auth to prevent unauthorized access to sensitive trade data
         address.require_auth();
-
-        let profile_key = DataKey::UserProfile(address.clone());
+        let key = DataKey::UserProfile(address.clone());
         match env
             .storage()
             .persistent()
-            .get::<DataKey, UserProfile>(&profile_key)
+            .get::<DataKey, UserProfile>(&key)
         {
             Some(profile) => {
-                Self::extend_persistent(&env, &profile_key);
+                // Issue #423/#435: extend TTL on read to prevent storage expiry
+                Self::extend_persistent(&env, &key);
                 (profile.successful_trades, profile.disputed_trades)
             }
             None => (0, 0),
