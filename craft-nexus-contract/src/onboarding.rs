@@ -9,6 +9,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, TryFromVal, Val, Vec,
 };
+use crate::alloc::string::ToString;
 extern crate alloc;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
@@ -2146,8 +2147,8 @@ impl OnboardingContract {
             env.panic_with_error(Error::ProfileDeactivated);
         }
 
-        let username_string = String::from_str(&env, profile.username.to_string().as_ref());
-        let normalized = normalize_username(&env, &username_string);
+        let username_str = String::from_str(&env, profile.username.to_string().as_ref());
+        let normalized = normalize_username(&env, &username_str);
         if normalized == String::from_str(&env, "admin") {
             env.panic_with_error(Error::Unauthorized);
         }
@@ -2252,8 +2253,8 @@ impl OnboardingContract {
         }
 
         // Re-claim username — fail if another user took it while deactivated
-        let username_string = String::from_str(&env, profile.username.to_string().as_ref());
-        let normalized = normalize_username(&env, &username_string);
+        let username_str = String::from_str(&env, profile.username.to_string().as_ref());
+        let normalized = normalize_username(&env, &username_str);
         if env
             .storage()
             .persistent()
