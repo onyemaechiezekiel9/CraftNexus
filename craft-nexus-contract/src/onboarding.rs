@@ -4,7 +4,7 @@
 //! profile management, and verification processes for buyers and artisans on the CraftNexus platform.
 
 
-
+use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, TryFromVal, Val, Vec,
