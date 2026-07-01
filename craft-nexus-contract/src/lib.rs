@@ -1121,12 +1121,10 @@ pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
 /// Guard to ensure reentry protection is cleared even if a panic or error occurs.
 /// This is essential to prevent contract locks from persisting across failed calls.
 /// Automatically removes the guard when dropped, ensuring cleanup in all control flows.
-#[allow(dead_code)]
 struct ReentryGuardScope<'a> {
     env: &'a Env,
 }
 
-#[allow(dead_code)]
 impl<'a> ReentryGuardScope<'a> {
     fn new(env: &'a Env) -> Self {
         CraftNexusContract::enter_reentry_guard(env);
@@ -2592,7 +2590,7 @@ impl CraftNexusContract {
         ipfs_hash: Option<String>,
         metadata_hash: Option<Bytes>,
     ) -> Escrow {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
         buyer.require_auth();
 
@@ -2733,7 +2731,6 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         escrow
     }
 
@@ -2750,7 +2747,7 @@ impl CraftNexusContract {
         ipfs_hash: Option<String>,
         metadata_hash: Option<Bytes>,
     ) -> Escrow {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
 
         // Validate release window bounds
         let config = Self::get_platform_config_internal(&env);
@@ -2848,11 +2845,10 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         escrow
     }
     pub fn fund_escrow(env: Env, order_id: u32) -> Result<(), Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let mut escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
@@ -2887,13 +2883,12 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         Ok(())
     }
 
     /// Cancel an escrow that has not been funded within the timeout period (#213).
     pub fn cancel_unfunded_escrow(env: Env, order_id: u32) -> Result<(), Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
@@ -2914,7 +2909,6 @@ impl CraftNexusContract {
         Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
         Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
 
-        Self::exit_reentry_guard(&env);
         Ok(())
     }
 
@@ -3492,7 +3486,7 @@ impl CraftNexusContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn release_funds(env: Env, order_id: u32) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
             env.panic_with_error(crate::Error::EscrowNotFound);
@@ -3554,7 +3548,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -3589,7 +3582,7 @@ impl CraftNexusContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn auto_release(env: Env, order_id: u32) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
             env.panic_with_error(crate::Error::EscrowNotFound);
@@ -3652,7 +3645,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -3688,7 +3680,7 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     /// * `additional_seconds` - Time in seconds to add to the release window
     pub fn extend_release_window(env: Env, order_id: u32, additional_seconds: u32) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow_key = (ESCROW, order_id);
         let escrow_opt = env.storage().persistent().get(&escrow_key);
 
@@ -3728,7 +3720,6 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
     }
 
     /// Reject obviously invalid WASM hashes before they touch storage.
@@ -4083,7 +4074,7 @@ impl CraftNexusContract {
     /// # Arguments
     /// * `escrow_id` - Escrow/Order identifier
     pub fn refund(env: Env, escrow_id: u64) -> Result<(), Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
@@ -4133,7 +4124,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -4372,7 +4362,7 @@ impl CraftNexusContract {
         resolution: Resolution,
         authorized_address: Address,
     ) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let config = Self::get_platform_config_internal(&env);
         authorized_address.require_auth();
         let is_authorized = authorized_address == config.admin
@@ -4437,7 +4427,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -4880,7 +4869,7 @@ impl CraftNexusContract {
         batch_id: u64,
         escrows: soroban_sdk::Vec<EscrowCreateParams>,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
 
         // Issue #111: Enforce batch size limit
@@ -4892,7 +4881,6 @@ impl CraftNexusContract {
 
         // Early exit for empty batch
         if escrows.is_empty() {
-            Self::exit_reentry_guard(&env);
             return Ok(results);
         }
 
@@ -4974,7 +4962,6 @@ impl CraftNexusContract {
                         results.push_back(id);
                     }
                     Err(e) => {
-                        Self::exit_reentry_guard(&env);
                         return Err(e);
                     }
                 }
@@ -5025,7 +5012,6 @@ impl CraftNexusContract {
             Self::update_escrow_indices_batch_atomic(&env, &order_ids);
         }
 
-        Self::exit_reentry_guard(&env);
         Ok(results)
     }
 
@@ -5043,7 +5029,7 @@ impl CraftNexusContract {
         order_ids: soroban_sdk::Vec<u32>,
         authorized_address: Address,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         authorized_address.require_auth();
 
         let mut results = soroban_sdk::Vec::new(&env);
@@ -5136,7 +5122,6 @@ impl CraftNexusContract {
             }
         }
 
-        Self::exit_reentry_guard(&env);
         Ok(results)
     }
 
@@ -6039,7 +6024,7 @@ impl CraftNexusContract {
         frequency: u64,
         duration: u32,
     ) -> RecurringEscrow {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
         buyer.require_auth();
 
@@ -6118,13 +6103,12 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         escrow
     }
 
     /// Release funds for the next cycle in a recurring escrow.
     pub fn release_next_cycle(env: Env, id: u64) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let key = DataKey::RecurringEscrow(id);
         let mut escrow: RecurringEscrow = env
             .storage()
@@ -6233,12 +6217,11 @@ impl CraftNexusContract {
             );
         }
 
-        Self::exit_reentry_guard(&env);
     }
 
     /// Cancel a recurring escrow and refund remaining funds to the buyer.
     pub fn cancel_recurring_escrow(env: Env, id: u64) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let key = DataKey::RecurringEscrow(id);
         let mut escrow: RecurringEscrow = env
             .storage()
@@ -6286,7 +6269,6 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
     }
 
     /// Get details of a recurring escrow.
