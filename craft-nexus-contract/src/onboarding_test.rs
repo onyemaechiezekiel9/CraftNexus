@@ -2179,7 +2179,6 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
-}
 
 #[test]
 fn test_onboarding_config_ttl_extension_on_read() {
